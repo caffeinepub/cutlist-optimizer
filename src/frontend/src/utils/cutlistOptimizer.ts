@@ -36,6 +36,7 @@ export interface FreeRect {
 }
 
 export interface OptimizedSheet {
+  stockSheetId: string;
   sheetIndex: number;
   sheetLabel: string;
   sheetWidth: number;
@@ -304,6 +305,7 @@ export function optimize(
 
     optimizedSheets.push({
       sheetIndex: sh.sheetIndex,
+      stockSheetId: sh.sheetDef.id,
       sheetLabel: sh.sheetDef.label,
       sheetWidth: sh.sheetDef.width,
       sheetHeight: sh.sheetDef.height,

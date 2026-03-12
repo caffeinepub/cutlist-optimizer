@@ -901,8 +901,8 @@ function App() {
       {/* Main content */}
       <div className="flex flex-1 overflow-hidden">
         {/* LEFT PANEL — Inputs */}
-        <aside className="w-80 shrink-0 border-r border-border bg-sidebar flex flex-col overflow-hidden">
-          <ScrollArea className="flex-1">
+        <aside className="w-80 shrink-0 border-r border-border bg-sidebar flex flex-col">
+          <div className="flex-1 overflow-y-auto min-h-0">
             <div className="p-4 space-y-6">
               {/* Stock Sheets Section */}
               <section>
@@ -1611,7 +1611,7 @@ function App() {
                 </section>
               )}
             </div>
-          </ScrollArea>
+          </div>
 
           {/* Optimize Button — sticky at bottom */}
           <div className="p-4 border-t border-border bg-sidebar">
@@ -1719,9 +1719,10 @@ function App() {
                 for (const sheet of result.sheets) {
                   const matchedStock = stocks.find(
                     (s) =>
-                      s.label === sheet.sheetLabel &&
-                      s.width === sheet.sheetWidth &&
-                      s.height === sheet.sheetHeight,
+                      s.id === sheet.stockSheetId ||
+                      (s.label === sheet.sheetLabel &&
+                        s.width === sheet.sheetWidth &&
+                        s.height === sheet.sheetHeight),
                   );
                   const laminateFront = matchedStock?.laminateFront ?? "";
                   const laminateBack = matchedStock?.laminateBack ?? "";
@@ -1759,6 +1760,21 @@ function App() {
                   }
                 }
                 const rows = Object.values(plySummary);
+                // Aggregate laminate sheets required per laminate material
+                const laminateTotals: Record<string, number> = {};
+                for (const r of rows) {
+                  if (r.laminateFront) {
+                    laminateTotals[r.laminateFront] =
+                      (laminateTotals[r.laminateFront] || 0) + r.count;
+                  }
+                  if (r.laminateBack) {
+                    laminateTotals[r.laminateBack] =
+                      (laminateTotals[r.laminateBack] || 0) + r.count;
+                  }
+                }
+                const laminateRows = Object.entries(laminateTotals).sort(
+                  (a, b) => a[0].localeCompare(b[0]),
+                );
                 const handleDownload = () => {
                   const header =
                     "Sheet Type,Width,Height,Min Qty Required,Front Laminate,Back Laminate,Assigned Pieces";
@@ -1766,7 +1782,17 @@ function App() {
                     (r) =>
                       `"${r.label}",${r.width},${r.height},${r.count},"${r.laminateFront || "-"}","${r.laminateBack || "-"}","${r.assignedPieceLabels.length > 0 ? r.assignedPieceLabels.join("; ") : "-"}"`,
                   );
-                  const csv = [header, ...csvRows].join("\n");
+                  const laminateHeader =
+                    "\n\nLaminate Material,Sheets Required";
+                  const laminateCsvRows = laminateRows.map(
+                    ([name, count]) => `"${name}",${count}`,
+                  );
+                  const csv = [
+                    header,
+                    ...csvRows,
+                    laminateHeader,
+                    ...laminateCsvRows,
+                  ].join("\n");
                   const blob = new Blob([csv], { type: "text/csv" });
                   const url = URL.createObjectURL(blob);
                   const a = document.createElement("a");
@@ -1872,6 +1898,44 @@ function App() {
                         </tbody>
                       </table>
                     </div>
+                    {laminateRows.length > 0 && (
+                      <div className="mt-4 pt-4 border-t border-border/30">
+                        <h3 className="text-sm font-semibold text-foreground mb-2">
+                          Laminate Sheets Required
+                        </h3>
+                        <table
+                          className="w-full text-sm"
+                          data-ocid="laminate.summary.table"
+                        >
+                          <thead>
+                            <tr className="border-b border-border/50">
+                              <th className="text-left py-2 pr-4 text-muted-foreground font-medium">
+                                Laminate Material
+                              </th>
+                              <th className="text-right py-2 text-muted-foreground font-medium">
+                                Sheets Required
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {laminateRows.map(([name, count], i) => (
+                              <tr
+                                key={name}
+                                className="border-b border-border/20 last:border-0"
+                                data-ocid={`laminate.summary.row.${i + 1}`}
+                              >
+                                <td className="py-2 pr-4 text-foreground">
+                                  {name}
+                                </td>
+                                <td className="py-2 text-right font-mono font-bold text-primary">
+                                  {count}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
                   </div>
                 );
               })()}
