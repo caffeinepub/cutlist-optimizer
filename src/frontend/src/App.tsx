@@ -24,22 +24,24 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Toaster } from "@/components/ui/sonner";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import jsPDF from "jspdf";
 import {
   AlertTriangle,
   Check,
   ChevronDown,
   ChevronUp,
   Download,
+  FileDown,
   FilePlus,
   FolderOpen,
   Layers,
-  LogOut,
   Pencil,
   Plus,
   RotateCcw,
   Save,
   Scissors,
   Trash2,
+  Upload,
   X,
   Zap,
 } from "lucide-react";
@@ -47,13 +49,12 @@ import { AnimatePresence, motion } from "motion/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import type { Piece, Sheet } from "./backend.d";
-import { useInternetIdentity } from "./hooks/useInternetIdentity";
 import {
-  useCreateProject,
-  useDeleteProject,
-  useGetAllProjects,
-  useUpdateProject,
-} from "./hooks/useQueries";
+  useLocalCreateProject,
+  useLocalDeleteProject,
+  useLocalGetAllProjects,
+  useLocalUpdateProject,
+} from "./hooks/useLocalProjects";
 import { optimize } from "./utils/cutlistOptimizer";
 import type {
   CutPiece,
@@ -479,9 +480,6 @@ function LaminateSelect({
 }
 
 function App() {
-  const { login, loginStatus, identity, clear } = useInternetIdentity();
-  const isLoggedIn = loginStatus === "success" && !!identity;
-
   // Unit
   const [unit, setUnit] = useState<Unit>("mm");
 
@@ -580,7 +578,6 @@ function App() {
   const [projectName, setProjectName] = useState("");
   const [showProjects, setShowProjects] = useState(false);
   const [showSaveDialog, setShowSaveDialog] = useState(false);
-  const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
   const [showNewProjectConfirm, setShowNewProjectConfirm] = useState(false);
   const [pendingProjectLoad, setPendingProjectLoad] = useState<
     (typeof projects)[0] | null
@@ -589,10 +586,10 @@ function App() {
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
 
   const { data: projects = [], isLoading: projectsLoading } =
-    useGetAllProjects();
-  const createProject = useCreateProject();
-  const updateProject = useUpdateProject();
-  const deleteProject = useDeleteProject();
+    useLocalGetAllProjects();
+  const createProject = useLocalCreateProject();
+  const updateProject = useLocalUpdateProject();
+  const deleteProject = useLocalDeleteProject();
 
   // Save edit for a stock sheet
   const saveStockEdit = useCallback(
@@ -777,27 +774,282 @@ function App() {
     );
   }, [stocks, pieces, allowRotation, considerKerf, kerfValue]);
 
+  // File import ref
+  const importInputRef = useRef<HTMLInputElement>(null);
+
+  // Export project as JSON
+  const exportProject = useCallback(() => {
+    const data = {
+      version: 1,
+      projectName: projectName || "cutlist-project",
+      stocks,
+      pieces,
+      laminateOptions,
+      considerKerf,
+      kerfValue,
+      allowRotation,
+    };
+    const blob = new Blob([JSON.stringify(data, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${projectName || "cutlist-project"}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast.success("Project exported!");
+  }, [
+    projectName,
+    stocks,
+    pieces,
+    laminateOptions,
+    considerKerf,
+    kerfValue,
+    allowRotation,
+  ]);
+
+  // Import project from JSON
+  const importProject = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        try {
+          const data = JSON.parse(ev.target?.result as string);
+          if (!Array.isArray(data.stocks) || !Array.isArray(data.pieces)) {
+            toast.error("Invalid project file: missing stocks or pieces");
+            return;
+          }
+          setStocks(
+            data.stocks.map((s: StockSheet) => ({ ...s, id: generateId() })),
+          );
+          setPieces(
+            data.pieces.map((p: CutPiece) => ({ ...p, id: generateId() })),
+          );
+          if (data.projectName) setProjectName(data.projectName);
+          if (Array.isArray(data.laminateOptions))
+            setLaminateOptions(data.laminateOptions);
+          if (typeof data.considerKerf === "boolean")
+            setConsiderKerf(data.considerKerf);
+          if (data.kerfValue) setKerfValue(data.kerfValue);
+          if (typeof data.allowRotation === "boolean")
+            setAllowRotation(data.allowRotation);
+          setResult(null);
+          setCurrentProjectId(null);
+          setActiveProjectId(null);
+          toast.success("Project imported!");
+        } catch {
+          toast.error("Failed to parse project file");
+        }
+      };
+      reader.readAsText(file);
+      // reset input so same file can be re-imported
+      e.target.value = "";
+    },
+    [],
+  );
+
+  const downloadLayoutPDF = useCallback(() => {
+    if (!result) return;
+    const doc = new jsPDF({
+      orientation: "landscape",
+      unit: "mm",
+      format: "a4",
+    });
+    const pageW = 297;
+    const pageH = 210;
+    const margin = 12;
+    const headerH = 14;
+    const footerH = 52;
+    const layoutAreaW = pageW - margin * 2;
+    const layoutAreaH = pageH - margin * 2 - headerH - footerH;
+
+    result.sheets.forEach((sheet, idx) => {
+      if (idx > 0) doc.addPage();
+
+      // Header
+      doc.setFontSize(11);
+      doc.setFont("helvetica", "bold");
+      const sheetTitle = `Sheet ${sheet.sheetIndex + 1} — ${sheet.sheetLabel}`;
+      doc.text(sheetTitle, margin, margin + 6);
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(9);
+      const unitLabel = unit === "mm" ? "mm" : "in";
+      const dimText = `${sheet.sheetWidth} × ${sheet.sheetHeight} ${unitLabel}   |   ${sheet.utilization.toFixed(1)}% used`;
+      doc.text(dimText, margin, margin + 11);
+      if (sheet.laminateFront || sheet.laminateBack) {
+        const lamText = `Laminate: F: ${sheet.laminateFront || "—"} / B: ${sheet.laminateBack || "—"}`;
+        doc.setFontSize(8);
+        doc.text(lamText, pageW - margin, margin + 6, { align: "right" });
+      }
+
+      // Sheet Layout
+      const layoutTop = margin + headerH;
+      const scaleX = layoutAreaW / sheet.sheetWidth;
+      const scaleY = layoutAreaH / sheet.sheetHeight;
+      const scale = Math.min(scaleX, scaleY);
+      const drawW = sheet.sheetWidth * scale;
+      const drawH = sheet.sheetHeight * scale;
+      const drawX = margin + (layoutAreaW - drawW) / 2;
+      const drawY = layoutTop;
+
+      doc.setFillColor(26, 28, 46);
+      doc.rect(drawX, drawY, drawW, drawH, "F");
+
+      for (const p of sheet.placedPieces) {
+        const colors = PIECE_COLORS[p.colorIndex % PIECE_COLORS.length];
+        const hex = colors.fill.replace("#", "");
+        const r = Number.parseInt(hex.substring(0, 2), 16);
+        const g = Number.parseInt(hex.substring(2, 4), 16);
+        const b = Number.parseInt(hex.substring(4, 6), 16);
+
+        const px = drawX + p.x * scale;
+        const py = drawY + p.y * scale;
+        const pw = p.w * scale;
+        const ph = p.h * scale;
+
+        doc.setFillColor(r, g, b);
+        doc.setDrawColor(255, 255, 255);
+        doc.setLineWidth(0.2);
+        doc.rect(px, py, pw, ph, "FD");
+
+        if (pw > 8 && ph > 5) {
+          doc.setFontSize(Math.min(6, (pw / p.label.length) * 1.8));
+          doc.setTextColor(255, 255, 255);
+          doc.text(p.label, px + pw / 2, py + ph / 2, {
+            align: "center",
+            baseline: "middle",
+          });
+          if (pw > 14 && ph > 9) {
+            doc.setFontSize(Math.min(5, pw / 8));
+            doc.setTextColor(220, 220, 220);
+            const dimStr = `${p.w}×${p.h}`;
+            doc.text(dimStr, px + pw / 2, py + ph / 2 + 3, {
+              align: "center",
+              baseline: "middle",
+            });
+          }
+        }
+      }
+
+      doc.setDrawColor(80, 80, 120);
+      doc.setLineWidth(0.3);
+      doc.rect(drawX, drawY, drawW, drawH, "S");
+
+      // Footer Legend
+      const footerTop = pageH - margin - footerH + 4;
+      doc.setDrawColor(180, 180, 200);
+      doc.setLineWidth(0.3);
+      doc.line(margin, footerTop - 1, pageW - margin, footerTop - 1);
+
+      doc.setFontSize(8);
+      doc.setFont("helvetica", "bold");
+      doc.setTextColor(60, 60, 80);
+      doc.text("Piece Legend", margin, footerTop + 4);
+
+      const pieceMap: Record<
+        string,
+        {
+          label: string;
+          w: number;
+          h: number;
+          count: number;
+          rotatedCount: number;
+          colorIndex: number;
+        }
+      > = {};
+      for (const p of sheet.placedPieces) {
+        const key = `${p.label}__${p.colorIndex}`;
+        if (!pieceMap[key]) {
+          pieceMap[key] = {
+            label: p.label,
+            w: p.w,
+            h: p.h,
+            count: 0,
+            rotatedCount: 0,
+            colorIndex: p.colorIndex,
+          };
+        }
+        pieceMap[key].count += 1;
+        if (p.rotated) pieceMap[key].rotatedCount += 1;
+      }
+      const legendItems = Object.values(pieceMap);
+
+      doc.setFontSize(7);
+      doc.setFont("helvetica", "bold");
+      doc.setTextColor(100, 100, 120);
+      doc.text("Part Name", margin + 8, footerTop + 10);
+      doc.text("Width", margin + 50, footerTop + 10);
+      doc.text("Height", margin + 85, footerTop + 10);
+      doc.text("Qty", margin + 110, footerTop + 10);
+      doc.text("Rotated", margin + 135, footerTop + 10);
+
+      doc.setLineWidth(0.2);
+      doc.setDrawColor(180, 180, 200);
+      doc.line(margin, footerTop + 12, pageW - margin, footerTop + 12);
+
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(7);
+
+      const maxRows = 5;
+      const colGroupW =
+        (pageW - margin * 2) / Math.ceil(legendItems.length / maxRows);
+      legendItems.forEach((item, i) => {
+        const col = Math.floor(i / maxRows);
+        const row = i % maxRows;
+        const baseX = margin + col * colGroupW;
+        const rowY = footerTop + 15 + row * 7;
+
+        const hex = PIECE_COLORS[
+          item.colorIndex % PIECE_COLORS.length
+        ].fill.replace("#", "");
+        const r = Number.parseInt(hex.substring(0, 2), 16);
+        const g = Number.parseInt(hex.substring(2, 4), 16);
+        const b = Number.parseInt(hex.substring(4, 6), 16);
+
+        doc.setFillColor(r, g, b);
+        doc.rect(baseX, rowY - 3, 4, 4, "F");
+
+        doc.setTextColor(40, 40, 60);
+        doc.text(item.label, baseX + 6, rowY);
+        doc.text(`${item.w} ${unitLabel}`, baseX + 40, rowY);
+        doc.text(`${item.h} ${unitLabel}`, baseX + 62, rowY);
+        doc.text(`${item.count}`, baseX + 84, rowY);
+        doc.text(
+          item.rotatedCount > 0 ? `${item.rotatedCount}×` : "—",
+          baseX + 96,
+          rowY,
+        );
+      });
+
+      doc.setTextColor(0, 0, 0);
+    });
+
+    doc.save("sheet-layouts.pdf");
+  }, [result, unit]);
+
   // Save project — returns true on success
   const saveProject = useCallback(async (): Promise<boolean> => {
-    if (!isLoggedIn) {
-      toast.error("Please log in to save projects");
-      return false;
-    }
     if (!projectName.trim()) {
       toast.error("Enter a project name");
       return false;
     }
-    const backendSheets: Sheet[] = stocks.map((s) => ({
+    const backendSheets = stocks.map((s) => ({
       sheetLabel: s.label,
       width: s.width,
       height: s.height,
       quantity: BigInt(s.quantity),
+      laminateFront: s.laminateFront,
+      laminateBack: s.laminateBack,
     }));
-    const backendPieces: Piece[] = pieces.map((p) => ({
+    const backendPieces = pieces.map((p) => ({
       description: p.label,
       width: p.width,
       height: p.height,
       quantity: BigInt(p.quantity),
+      stockSheetId: p.stockSheetId,
     }));
     try {
       if (currentProjectId) {
@@ -806,12 +1058,20 @@ function App() {
           name: projectName,
           sheets: backendSheets,
           pieces: backendPieces,
+          laminateOptions,
+          considerKerf,
+          kerfValue: kerfValue ? Number(kerfValue) : undefined,
+          allowRotation,
         });
       } else {
         const newId = await createProject.mutateAsync({
           name: projectName,
           sheets: backendSheets,
           pieces: backendPieces,
+          laminateOptions,
+          considerKerf,
+          kerfValue: kerfValue ? Number(kerfValue) : undefined,
+          allowRotation,
         });
         if (newId) {
           setCurrentProjectId(newId);
@@ -826,13 +1086,16 @@ function App() {
       return false;
     }
   }, [
-    isLoggedIn,
     projectName,
     stocks,
     pieces,
     createProject,
     updateProject,
     currentProjectId,
+    laminateOptions,
+    considerKerf,
+    kerfValue,
+    allowRotation,
   ]);
 
   // Load project
@@ -844,6 +1107,8 @@ function App() {
         width: s.width,
         height: s.height,
         quantity: Number(s.quantity),
+        laminateFront: s.laminateFront,
+        laminateBack: s.laminateBack,
       })),
     );
     setPieces(
@@ -853,9 +1118,18 @@ function App() {
         width: p.width,
         height: p.height,
         quantity: Number(p.quantity),
+        stockSheetId: p.stockSheetId,
       })),
     );
     setProjectName(project.name);
+    if (project.laminateOptions && project.laminateOptions.length > 0)
+      setLaminateOptions(project.laminateOptions);
+    if (typeof project.considerKerf === "boolean")
+      setConsiderKerf(project.considerKerf);
+    if (project.kerfValue !== undefined)
+      setKerfValue(String(project.kerfValue));
+    if (typeof project.allowRotation === "boolean")
+      setAllowRotation(project.allowRotation);
     setActiveProjectId(project.id);
     setCurrentProjectId(project.id);
     setShowProjects(false);
@@ -930,64 +1204,67 @@ function App() {
               Projects
             </Button>
 
-            {/* New Project Button — only when logged in */}
-            {isLoggedIn && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => {
-                  const hasData = stocks.length > 0 || pieces.length > 0;
-                  if (hasData) {
-                    setShowNewProjectConfirm(true);
-                  } else {
-                    // workspace already empty, nothing to clear
-                    toast.info("Workspace is already empty.");
-                  }
-                }}
-                className="gap-1.5 text-xs"
-                data-ocid="project.new_button"
-              >
-                <FilePlus className="w-3.5 h-3.5" />
-                New
-              </Button>
-            )}
+            {/* New Project Button */}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                const hasData = stocks.length > 0 || pieces.length > 0;
+                if (hasData) {
+                  setShowNewProjectConfirm(true);
+                } else {
+                  toast.info("Workspace is already empty.");
+                }
+              }}
+              className="gap-1.5 text-xs"
+              data-ocid="project.new_button"
+            >
+              <FilePlus className="w-3.5 h-3.5" />
+              New
+            </Button>
 
-            {/* Save Button — only when logged in */}
-            {isLoggedIn && (
-              <Button
-                variant="default"
-                size="sm"
-                onClick={() => setShowSaveDialog(true)}
-                className="gap-1.5 text-xs"
-                data-ocid="project.open_modal_button"
-              >
-                <Save className="w-3.5 h-3.5" />
-                Save
-              </Button>
-            )}
+            {/* Save Button */}
+            <Button
+              variant="default"
+              size="sm"
+              onClick={() => setShowSaveDialog(true)}
+              className="gap-1.5 text-xs"
+              data-ocid="project.open_modal_button"
+            >
+              <Save className="w-3.5 h-3.5" />
+              Save
+            </Button>
 
-            {/* Auth */}
-            {isLoggedIn ? (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setShowLogoutConfirm(true)}
-                className="text-xs text-muted-foreground gap-1"
-              >
-                <LogOut className="w-3 h-3" />
-                {identity?.getPrincipal().toString().slice(0, 8)}…
-              </Button>
-            ) : (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={login}
-                className="text-xs"
-                disabled={loginStatus === "logging-in"}
-              >
-                {loginStatus === "logging-in" ? "Connecting…" : "Login"}
-              </Button>
-            )}
+            {/* Export Button */}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={exportProject}
+              className="gap-1.5 text-xs"
+              data-ocid="topbar.export_button"
+            >
+              <Download className="w-3.5 h-3.5" />
+              Export
+            </Button>
+
+            {/* Import Button */}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => importInputRef.current?.click()}
+              className="gap-1.5 text-xs"
+              data-ocid="topbar.import_button"
+            >
+              <Upload className="w-3.5 h-3.5" />
+              Import
+            </Button>
+            <input
+              ref={importInputRef}
+              type="file"
+              accept=".json"
+              onChange={importProject}
+              className="hidden"
+            />
           </div>
         </div>
       </header>
@@ -999,35 +1276,33 @@ function App() {
           <div className="flex-1 overflow-y-auto min-h-0">
             <div className="p-4 space-y-6">
               {/* Project save */}
-              {isLoggedIn && (
-                <section>
-                  <h2 className="font-display font-semibold text-sm text-foreground mb-3">
-                    Save Project
-                  </h2>
-                  <div className="space-y-2">
-                    <Input
-                      value={projectName}
-                      onChange={(e) => setProjectName(e.target.value)}
-                      placeholder="Project name…"
-                      className="h-7 text-xs"
-                      data-ocid="project.input"
-                    />
-                    <Button
-                      onClick={saveProject}
-                      size="sm"
-                      variant="outline"
-                      className="w-full h-7 text-xs gap-1.5"
-                      disabled={createProject.isPending}
-                      data-ocid="project.save_button"
-                    >
-                      <Save className="w-3.5 h-3.5" />
-                      {createProject.isPending ? "Saving…" : "Save Project"}
-                    </Button>
-                  </div>
-                </section>
-              )}
+              <section>
+                <h2 className="font-display font-semibold text-sm text-foreground mb-3">
+                  Save Project
+                </h2>
+                <div className="space-y-2">
+                  <Input
+                    value={projectName}
+                    onChange={(e) => setProjectName(e.target.value)}
+                    placeholder="Project name…"
+                    className="h-7 text-xs"
+                    data-ocid="project.input"
+                  />
+                  <Button
+                    onClick={saveProject}
+                    size="sm"
+                    variant="outline"
+                    className="w-full h-7 text-xs gap-1.5"
+                    disabled={createProject.isPending}
+                    data-ocid="project.save_button"
+                  >
+                    <Save className="w-3.5 h-3.5" />
+                    {createProject.isPending ? "Saving…" : "Save Project"}
+                  </Button>
+                </div>
+              </section>
 
-              {isLoggedIn && <Separator />}
+              <Separator />
 
               {/* Stock Sheets Section */}
               <section>
@@ -2036,11 +2311,23 @@ function App() {
 
               {/* Sheet diagrams */}
               <div className="space-y-6">
-                <h2 className="font-display text-lg font-bold text-foreground flex items-center gap-2">
-                  <Layers className="w-5 h-5 text-primary" />
-                  Sheet Layout ({result.totalSheets} sheet
-                  {result.totalSheets !== 1 ? "s" : ""})
-                </h2>
+                <div className="flex items-center justify-between">
+                  <h2 className="font-display text-lg font-bold text-foreground flex items-center gap-2">
+                    <Layers className="w-5 h-5 text-primary" />
+                    Sheet Layout ({result.totalSheets} sheet
+                    {result.totalSheets !== 1 ? "s" : ""})
+                  </h2>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={downloadLayoutPDF}
+                    className="gap-2"
+                    data-ocid="layout.download_pdf_button"
+                  >
+                    <FileDown className="w-4 h-4" />
+                    Download PDF
+                  </Button>
+                </div>
                 {result.sheets.map((sheet) => (
                   <motion.div
                     key={sheet.sheetIndex}
@@ -2184,16 +2471,7 @@ function App() {
           <DialogHeader>
             <DialogTitle className="font-display">Saved Projects</DialogTitle>
           </DialogHeader>
-          {!isLoggedIn ? (
-            <div className="text-center py-8 space-y-3">
-              <p className="text-sm text-muted-foreground">
-                Log in to view and manage your saved projects.
-              </p>
-              <Button onClick={login} size="sm">
-                Login to Continue
-              </Button>
-            </div>
-          ) : projectsLoading ? (
+          {projectsLoading ? (
             <div
               className="py-8 text-center text-sm text-muted-foreground"
               data-ocid="project.loading_state"
@@ -2377,28 +2655,6 @@ function App() {
         </DialogContent>
       </Dialog>
 
-      <AlertDialog open={showLogoutConfirm} onOpenChange={setShowLogoutConfirm}>
-        <AlertDialogContent data-ocid="logout.dialog">
-          <AlertDialogHeader>
-            <AlertDialogTitle>Log out?</AlertDialogTitle>
-            <AlertDialogDescription>
-              Any unsaved changes will be lost. Make sure you have saved your
-              project before logging out.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel data-ocid="logout.cancel_button">
-              Cancel
-            </AlertDialogCancel>
-            <AlertDialogAction
-              onClick={clear}
-              data-ocid="logout.confirm_button"
-            >
-              Log out
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
       <AlertDialog
         open={pendingProjectLoad !== null}
         onOpenChange={(open) => {
@@ -2435,7 +2691,6 @@ function App() {
         </AlertDialogContent>
       </AlertDialog>
 
-      <Toaster richColors />
       <Toaster richColors />
     </div>
   );

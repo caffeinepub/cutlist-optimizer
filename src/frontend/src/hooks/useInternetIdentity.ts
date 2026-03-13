@@ -4,6 +4,7 @@ import {
   type AuthClientLoginOptions,
 } from "@dfinity/auth-client";
 import type { Identity } from "@icp-sdk/core/agent";
+import { DelegationIdentity, isDelegationValid } from "@icp-sdk/core/identity";
 import {
   type PropsWithChildren,
   type ReactNode,
@@ -185,7 +186,12 @@ export function InternetIdentityProvider({
       return;
     }
 
-    if (loginStatus === "success") {
+    const currentIdentity = authClient.getIdentity();
+    if (
+      !currentIdentity.getPrincipal().isAnonymous() &&
+      currentIdentity instanceof DelegationIdentity &&
+      isDelegationValid(currentIdentity.getDelegation())
+    ) {
       setErrorMessage("User is already authenticated");
       return;
     }
@@ -199,13 +205,7 @@ export function InternetIdentityProvider({
 
     setStatus("logging-in");
     void authClient.login(options);
-  }, [
-    authClient,
-    loginStatus,
-    handleLoginError,
-    handleLoginSuccess,
-    setErrorMessage,
-  ]);
+  }, [authClient, handleLoginError, handleLoginSuccess, setErrorMessage]);
 
   const clear = useCallback(() => {
     if (!authClient) {
@@ -236,33 +236,33 @@ export function InternetIdentityProvider({
     void (async () => {
       try {
         setStatus("initializing");
-        const existingClient = await createAuthClient(createOptions);
-        if (cancelled) return;
-        setAuthClient(existingClient);
+        let existingClient = authClient;
+        if (!existingClient) {
+          existingClient = await createAuthClient(createOptions);
+          if (cancelled) return;
+          setAuthClient(existingClient);
+        }
         const isAuthenticated = await existingClient.isAuthenticated();
         if (cancelled) return;
         if (isAuthenticated) {
           const loadedIdentity = existingClient.getIdentity();
           setIdentity(loadedIdentity);
-          setStatus("success");
-          return;
         }
-        setStatus("idle");
       } catch (unknownError) {
-        if (!cancelled) {
-          setStatus("loginError");
-          setError(
-            unknownError instanceof Error
-              ? unknownError
-              : new Error("Initialization failed"),
-          );
-        }
+        setStatus("loginError");
+        setError(
+          unknownError instanceof Error
+            ? unknownError
+            : new Error("Initialization failed"),
+        );
+      } finally {
+        if (!cancelled) setStatus("idle");
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [createOptions]);
+  }, [createOptions, authClient]);
 
   const value = useMemo<ProviderValue>(
     () => ({
