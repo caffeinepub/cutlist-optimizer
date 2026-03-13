@@ -769,6 +769,15 @@ function App() {
     const kerf = considerKerf ? Number.parseFloat(kerfValue) || 0 : 0;
     const res = optimize(stocks, pieces, allowRotation, kerf);
     setResult(res);
+    // Sync stock sheet quantities: if auto-increment added sheets, update the stocks state
+    if (res.autoIncreasedSheets.length > 0) {
+      setStocks((prev) =>
+        prev.map((s) => {
+          const inc = res.autoIncreasedSheets.find((a) => a.sheetId === s.id);
+          return inc ? { ...s, quantity: s.quantity + inc.addedQty } : s;
+        }),
+      );
+    }
     toast.success(
       `Optimization complete — ${res.totalSheets} sheet${res.totalSheets !== 1 ? "s" : ""} used`,
     );
@@ -980,11 +989,11 @@ function App() {
       doc.setFontSize(7);
       doc.setFont("helvetica", "bold");
       doc.setTextColor(100, 100, 120);
-      doc.text("Part Name", margin + 8, footerTop + 10);
-      doc.text("Width", margin + 50, footerTop + 10);
-      doc.text("Height", margin + 85, footerTop + 10);
-      doc.text("Qty", margin + 110, footerTop + 10);
-      doc.text("Rotated", margin + 135, footerTop + 10);
+      doc.text("Part Name", margin + 6, footerTop + 10);
+      doc.text("Width", margin + 40, footerTop + 10);
+      doc.text("Height", margin + 62, footerTop + 10);
+      doc.text("Qty", margin + 84, footerTop + 10);
+      doc.text("Rotated", margin + 96, footerTop + 10);
 
       doc.setLineWidth(0.2);
       doc.setDrawColor(180, 180, 200);
@@ -1037,6 +1046,7 @@ function App() {
       return false;
     }
     const backendSheets = stocks.map((s) => ({
+      sheetId: s.id,
       sheetLabel: s.label,
       width: s.width,
       height: s.height,
@@ -1102,7 +1112,7 @@ function App() {
   const loadProject = useCallback((project: (typeof projects)[0]) => {
     setStocks(
       project.sheets.map((s) => ({
-        id: generateId(),
+        id: s.sheetId || generateId(),
         label: s.sheetLabel,
         width: s.width,
         height: s.height,
@@ -2053,19 +2063,38 @@ function App() {
                 <Progress value={result.utilization} className="h-2" />
               </div>
 
-              {/* Unplaced pieces warning */}
+              {/* Auto-increased sheets info */}
+              {result.autoIncreasedSheets.length > 0 && (
+                <div className="flex items-start gap-3 bg-amber-500/10 border border-amber-500/30 rounded-lg p-4">
+                  <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
+                  <div>
+                    <p className="text-sm font-semibold text-amber-600 dark:text-amber-400">
+                      Stock sheets were automatically increased
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      {result.autoIncreasedSheets
+                        .map((s) => `${s.sheetLabel} (+${s.addedQty} added)`)
+                        .join(", ")}{" "}
+                      — update your stock quantities to match.
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* Unplaced pieces warning — only shown if a piece is larger than ALL stock sheets */}
               {result.unplacedPieces.length > 0 && (
                 <div className="flex items-start gap-3 bg-destructive/10 border border-destructive/30 rounded-lg p-4">
                   <AlertTriangle className="w-4 h-4 text-destructive mt-0.5 shrink-0" />
                   <div>
                     <p className="text-sm font-semibold text-destructive">
-                      Some pieces could not be placed
+                      Some pieces are too large to fit any stock sheet
                     </p>
                     <p className="text-xs text-muted-foreground mt-1">
                       {result.unplacedPieces
                         .map((u) => `${u.label} (×${u.qty})`)
                         .join(", ")}{" "}
-                      — pieces exceed stock sheet dimensions
+                      — please add a larger stock sheet or reduce piece
+                      dimensions
                     </p>
                   </div>
                 </div>

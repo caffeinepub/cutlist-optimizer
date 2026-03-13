@@ -14,6 +14,7 @@ export interface CutPiece {
   width: number;
   height: number;
   quantity: number;
+  stockSheetId?: string; // optional: restrict to a specific stock sheet
 }
 
 export interface PlacedPiece {
@@ -35,10 +36,13 @@ export interface FreeRect {
 }
 
 export interface OptimizedSheet {
+  stockSheetId: string;
   sheetIndex: number;
   sheetLabel: string;
   sheetWidth: number;
   sheetHeight: number;
+  laminateFront: string;
+  laminateBack: string;
   placedPieces: PlacedPiece[];
   freeRects: FreeRect[];
   usedArea: number;
@@ -53,6 +57,7 @@ export interface OptimizationResult {
   usedArea: number;
   utilization: number;
   unplacedPieces: Array<{ label: string; qty: number }>;
+  autoIncreasedSheets: Array<{ sheetLabel: string; addedQty: number }>;
 }
 
 function rectFits(pw: number, ph: number, fw: number, fh: number): boolean {
@@ -68,12 +73,9 @@ function guillotineSplit(
   const rightW = freeRect.w - pw;
   const topH = freeRect.h - ph;
 
-  // Choose split axis: maximize the larger remaining rectangle
-  // Short-axis split rule: split along shorter remaining axis
   const splitHorizontal = rightW > topH;
 
   if (splitHorizontal) {
-    // Right rectangle
     if (rightW > 0 && freeRect.h > 0) {
       result.push({
         x: freeRect.x + pw,
@@ -82,12 +84,10 @@ function guillotineSplit(
         h: freeRect.h,
       });
     }
-    // Top rectangle (above placed piece, left portion)
     if (pw > 0 && topH > 0) {
       result.push({ x: freeRect.x, y: freeRect.y + ph, w: pw, h: topH });
     }
   } else {
-    // Top rectangle (full width)
     if (freeRect.w > 0 && topH > 0) {
       result.push({
         x: freeRect.x,
@@ -96,7 +96,6 @@ function guillotineSplit(
         h: topH,
       });
     }
-    // Right rectangle (below top)
     if (rightW > 0 && ph > 0) {
       result.push({ x: freeRect.x + pw, y: freeRect.y, w: rightW, h: ph });
     }
@@ -118,9 +117,7 @@ function findBestFreeRect(
   for (let i = 0; i < freeRects.length; i++) {
     const fr = freeRects[i];
 
-    // Try normal orientation
     if (rectFits(pw, ph, fr.w, fr.h)) {
-      // Best short-side fit heuristic
       const score = Math.min(fr.w - pw, fr.h - ph);
       if (score < bestScore) {
         bestScore = score;
@@ -129,7 +126,6 @@ function findBestFreeRect(
       }
     }
 
-    // Try rotated
     if (allowRotation && pw !== ph && rectFits(ph, pw, fr.w, fr.h)) {
       const score = Math.min(fr.w - ph, fr.h - pw);
       if (score < bestScore) {
@@ -148,6 +144,7 @@ export function optimize(
   stocks: StockSheet[],
   pieces: CutPiece[],
   allowRotation = true,
+  kerf = 0,
 ): OptimizationResult {
   // Expand pieces by quantity, sorted by area descending
   const allPieces: Array<{ piece: CutPiece; colorIndex: number }> = [];
@@ -158,23 +155,26 @@ export function optimize(
     }
   }
 
-  // Sort by area desc
+  // Sort by area desc (use kerf-adjusted area for sorting)
   allPieces.sort((a, b) => {
-    const areaA = a.piece.width * a.piece.height;
-    const areaB = b.piece.width * b.piece.height;
+    const areaA = (a.piece.width + kerf) * (a.piece.height + kerf);
+    const areaB = (b.piece.width + kerf) * (b.piece.height + kerf);
     return areaB - areaA;
   });
 
-  // Expand available stock sheets
-  const availableSheets: Array<{ sheet: StockSheet; remaining: number }> = [];
+  // Expand available stock sheets (track remaining and auto-added counts)
+  const availableSheets: Array<{
+    sheet: StockSheet;
+    remaining: number;
+    autoAdded: number;
+  }> = [];
   for (const s of stocks) {
-    availableSheets.push({ sheet: s, remaining: s.quantity });
+    availableSheets.push({ sheet: s, remaining: s.quantity, autoAdded: 0 });
   }
 
   const optimizedSheets: OptimizedSheet[] = [];
   const unplacedPieces: Array<{ label: string; qty: number }> = [];
 
-  // Open sheets as we go
   const openSheets: Array<{
     sheetDef: StockSheet;
     freeRects: FreeRect[];
@@ -182,9 +182,36 @@ export function optimize(
     sheetIndex: number;
   }> = [];
 
-  function openNewSheet(): (typeof openSheets)[0] | null {
-    // Find available stock with remaining quantity
-    for (const avail of availableSheets) {
+  // Check if a piece can physically fit on a sheet (ignoring quantity)
+  function pieceCanFitOnSheet(
+    pw: number,
+    ph: number,
+    sheet: StockSheet,
+  ): boolean {
+    return (
+      rectFits(pw, ph, sheet.width, sheet.height) ||
+      (allowRotation && rectFits(ph, pw, sheet.width, sheet.height))
+    );
+  }
+
+  function openNewSheet(
+    pw: number,
+    ph: number,
+    preferredStockId?: string,
+  ): (typeof openSheets)[0] | null {
+    // Try preferred stock first, then any available
+    const candidates = preferredStockId
+      ? [
+          ...availableSheets.filter(
+            (a) => a.sheet.id === preferredStockId && a.remaining > 0,
+          ),
+          ...availableSheets.filter(
+            (a) => a.sheet.id !== preferredStockId && a.remaining > 0,
+          ),
+        ]
+      : availableSheets.filter((a) => a.remaining > 0);
+
+    for (const avail of candidates) {
       if (avail.remaining > 0) {
         avail.remaining--;
         const sh = {
@@ -199,37 +226,65 @@ export function optimize(
         return sh;
       }
     }
+
+    // No sheets remaining — try to auto-increase a sheet that can fit this piece
+    const autoTarget = preferredStockId
+      ? availableSheets.find((a) => a.sheet.id === preferredStockId)
+      : availableSheets.find((a) => pieceCanFitOnSheet(pw, ph, a.sheet));
+
+    if (autoTarget && pieceCanFitOnSheet(pw, ph, autoTarget.sheet)) {
+      autoTarget.autoAdded++;
+      autoTarget.remaining = 0; // will be decremented right away below
+      autoTarget.remaining++;
+      autoTarget.remaining--;
+      // Open a new sheet of this type
+      const sh = {
+        sheetDef: autoTarget.sheet,
+        freeRects: [
+          { x: 0, y: 0, w: autoTarget.sheet.width, h: autoTarget.sheet.height },
+        ],
+        placedPieces: [] as PlacedPiece[],
+        sheetIndex: optimizedSheets.length + openSheets.length,
+      };
+      openSheets.push(sh);
+      return sh;
+    }
+
     return null;
   }
 
   for (const { piece, colorIndex } of allPieces) {
+    // Kerf-adjusted dimensions for fitting
+    const pw = piece.width + kerf;
+    const ph = piece.height + kerf;
     let placed = false;
 
+    // Determine which open sheets this piece can use
+    const eligibleSheets = piece.stockSheetId
+      ? openSheets.filter((sh) => sh.sheetDef.id === piece.stockSheetId)
+      : openSheets;
+
     // Try existing open sheets
-    for (const sh of openSheets) {
-      const fit = findBestFreeRect(
-        sh.freeRects,
-        piece.width,
-        piece.height,
-        allowRotation,
-      );
+    for (const sh of eligibleSheets) {
+      const fit = findBestFreeRect(sh.freeRects, pw, ph, allowRotation);
       if (fit) {
         const fr = sh.freeRects[fit.index];
-        const pw = fit.rotated ? piece.height : piece.width;
-        const ph = fit.rotated ? piece.width : piece.height;
+        const placedW = fit.rotated ? ph : pw;
+        const placedH = fit.rotated ? pw : ph;
 
         sh.placedPieces.push({
           label: piece.label,
           x: fr.x,
           y: fr.y,
-          w: pw,
-          h: ph,
+          // Store actual piece size (not kerf-adjusted) for display
+          w: fit.rotated ? piece.height : piece.width,
+          h: fit.rotated ? piece.width : piece.height,
           rotated: fit.rotated,
           pieceId: piece.id,
           colorIndex,
         });
 
-        const newRects = guillotineSplit(fr, pw, ph);
+        const newRects = guillotineSplit(fr, placedW, placedH);
         sh.freeRects.splice(fit.index, 1, ...newRects);
         placed = true;
         break;
@@ -237,43 +292,58 @@ export function optimize(
     }
 
     if (!placed) {
-      // Open a new sheet
-      const newSheet = openNewSheet();
+      const newSheet = openNewSheet(pw, ph, piece.stockSheetId);
       if (newSheet) {
-        const fit = findBestFreeRect(
-          newSheet.freeRects,
-          piece.width,
-          piece.height,
-          allowRotation,
-        );
-        if (fit) {
-          const fr = newSheet.freeRects[fit.index];
-          const pw = fit.rotated ? piece.height : piece.width;
-          const ph = fit.rotated ? piece.width : piece.height;
+        // When restricted to a specific stock sheet, only open that type
+        if (piece.stockSheetId && newSheet.sheetDef.id !== piece.stockSheetId) {
+          // Couldn't open the right sheet type
+        } else {
+          const fit = findBestFreeRect(
+            newSheet.freeRects,
+            pw,
+            ph,
+            allowRotation,
+          );
+          if (fit) {
+            const fr = newSheet.freeRects[fit.index];
+            const placedW = fit.rotated ? ph : pw;
+            const placedH = fit.rotated ? pw : ph;
 
-          newSheet.placedPieces.push({
-            label: piece.label,
-            x: fr.x,
-            y: fr.y,
-            w: pw,
-            h: ph,
-            rotated: fit.rotated,
-            pieceId: piece.id,
-            colorIndex,
-          });
+            newSheet.placedPieces.push({
+              label: piece.label,
+              x: fr.x,
+              y: fr.y,
+              w: fit.rotated ? piece.height : piece.width,
+              h: fit.rotated ? piece.width : piece.height,
+              rotated: fit.rotated,
+              pieceId: piece.id,
+              colorIndex,
+            });
 
-          const newRects = guillotineSplit(fr, pw, ph);
-          newSheet.freeRects.splice(fit.index, 1, ...newRects);
-          placed = true;
+            const newRects = guillotineSplit(fr, placedW, placedH);
+            newSheet.freeRects.splice(fit.index, 1, ...newRects);
+            placed = true;
+          }
         }
       }
 
       if (!placed) {
-        // Piece doesn't fit on any sheet — record as unplaced
         const existing = unplacedPieces.find((u) => u.label === piece.label);
         if (existing) existing.qty++;
         else unplacedPieces.push({ label: piece.label, qty: 1 });
       }
+    }
+  }
+
+  // Collect auto-increased sheets info
+  const autoIncreasedSheets: Array<{ sheetLabel: string; addedQty: number }> =
+    [];
+  for (const avail of availableSheets) {
+    if (avail.autoAdded > 0) {
+      autoIncreasedSheets.push({
+        sheetLabel: avail.sheet.label,
+        addedQty: avail.autoAdded,
+      });
     }
   }
 
@@ -292,9 +362,12 @@ export function optimize(
 
     optimizedSheets.push({
       sheetIndex: sh.sheetIndex,
+      stockSheetId: sh.sheetDef.id,
       sheetLabel: sh.sheetDef.label,
       sheetWidth: sh.sheetDef.width,
       sheetHeight: sh.sheetDef.height,
+      laminateFront: sh.sheetDef.laminateFront ?? "",
+      laminateBack: sh.sheetDef.laminateBack ?? "",
       placedPieces: sh.placedPieces,
       freeRects: sh.freeRects,
       usedArea: sheetUsedArea,
@@ -311,5 +384,6 @@ export function optimize(
     usedArea,
     utilization: totalArea > 0 ? (usedArea / totalArea) * 100 : 0,
     unplacedPieces,
+    autoIncreasedSheets,
   };
 }

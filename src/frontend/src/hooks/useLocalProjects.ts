@@ -6,6 +6,7 @@ export type LocalProject = {
   id: string;
   name: string;
   sheets: Array<{
+    sheetId?: string; // persisted stock sheet ID so piece assignments survive reload
     sheetLabel: string;
     width: number;
     height: number;
@@ -33,6 +34,7 @@ type StoredProject = {
   id: string;
   name: string;
   sheets: Array<{
+    sheetId?: string;
     sheetLabel: string;
     width: number;
     height: number;
@@ -95,6 +97,7 @@ export function useLocalCreateProject() {
     mutationFn: async (input: {
       name: string;
       sheets: Array<{
+        sheetId?: string;
         sheetLabel: string;
         width: number;
         height: number;
@@ -150,6 +153,7 @@ export function useLocalUpdateProject() {
       id: string;
       name: string;
       sheets: Array<{
+        sheetId?: string;
         sheetLabel: string;
         width: number;
         height: number;

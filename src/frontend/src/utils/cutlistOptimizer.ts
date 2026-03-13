@@ -57,6 +57,11 @@ export interface OptimizationResult {
   usedArea: number;
   utilization: number;
   unplacedPieces: Array<{ label: string; qty: number }>;
+  autoIncreasedSheets: Array<{
+    sheetId: string;
+    sheetLabel: string;
+    addedQty: number;
+  }>;
 }
 
 function rectFits(pw: number, ph: number, fw: number, fh: number): boolean {
@@ -161,10 +166,14 @@ export function optimize(
     return areaB - areaA;
   });
 
-  // Expand available stock sheets
-  const availableSheets: Array<{ sheet: StockSheet; remaining: number }> = [];
+  // Expand available stock sheets (track remaining and auto-added counts)
+  const availableSheets: Array<{
+    sheet: StockSheet;
+    remaining: number;
+    autoAdded: number;
+  }> = [];
   for (const s of stocks) {
-    availableSheets.push({ sheet: s, remaining: s.quantity });
+    availableSheets.push({ sheet: s, remaining: s.quantity, autoAdded: 0 });
   }
 
   const optimizedSheets: OptimizedSheet[] = [];
@@ -177,36 +186,81 @@ export function optimize(
     sheetIndex: number;
   }> = [];
 
+  // Check if a piece can physically fit on a sheet (ignoring quantity)
+  function pieceCanFitOnSheet(
+    pw: number,
+    ph: number,
+    sheet: StockSheet,
+  ): boolean {
+    return (
+      rectFits(pw, ph, sheet.width, sheet.height) ||
+      (allowRotation && rectFits(ph, pw, sheet.width, sheet.height))
+    );
+  }
+
   function openNewSheet(
+    pw: number,
+    ph: number,
     preferredStockId?: string,
   ): (typeof openSheets)[0] | null {
-    // Try preferred stock first, then any available
+    // If a preferred stock sheet is specified, ONLY use that sheet type — never fall back to others.
+    // If no preference, use any sheet that fits.
     const candidates = preferredStockId
-      ? [
-          ...availableSheets.filter(
-            (a) => a.sheet.id === preferredStockId && a.remaining > 0,
-          ),
-          ...availableSheets.filter(
-            (a) => a.sheet.id !== preferredStockId && a.remaining > 0,
-          ),
-        ]
-      : availableSheets.filter((a) => a.remaining > 0);
+      ? availableSheets.filter(
+          (a) =>
+            a.sheet.id === preferredStockId &&
+            a.remaining > 0 &&
+            pieceCanFitOnSheet(pw, ph, a.sheet),
+        )
+      : availableSheets.filter(
+          (a) => a.remaining > 0 && pieceCanFitOnSheet(pw, ph, a.sheet),
+        );
 
+    // Open a sheet from stock with remaining quantity
     for (const avail of candidates) {
-      if (avail.remaining > 0) {
-        avail.remaining--;
-        const sh = {
-          sheetDef: avail.sheet,
-          freeRects: [
-            { x: 0, y: 0, w: avail.sheet.width, h: avail.sheet.height },
-          ],
-          placedPieces: [] as PlacedPiece[],
-          sheetIndex: optimizedSheets.length + openSheets.length,
-        };
-        openSheets.push(sh);
-        return sh;
-      }
+      avail.remaining--;
+      const sh = {
+        sheetDef: avail.sheet,
+        freeRects: [
+          { x: 0, y: 0, w: avail.sheet.width, h: avail.sheet.height },
+        ],
+        placedPieces: [] as PlacedPiece[],
+        sheetIndex: optimizedSheets.length + openSheets.length,
+      };
+      openSheets.push(sh);
+      return sh;
     }
+
+    // No sheets remaining — auto-increment.
+    // If a preferred sheet ID is given, ONLY auto-increment that specific sheet type.
+    // If no preference, auto-increment any sheet that can physically fit this piece.
+    const autoTarget = preferredStockId
+      ? availableSheets.find(
+          (a) =>
+            a.sheet.id === preferredStockId &&
+            pieceCanFitOnSheet(pw, ph, a.sheet),
+        )
+      : availableSheets.find((a) => pieceCanFitOnSheet(pw, ph, a.sheet));
+
+    if (autoTarget) {
+      autoTarget.autoAdded++;
+      const sh = {
+        sheetDef: autoTarget.sheet,
+        freeRects: [
+          {
+            x: 0,
+            y: 0,
+            w: autoTarget.sheet.width,
+            h: autoTarget.sheet.height,
+          },
+        ],
+        placedPieces: [] as PlacedPiece[],
+        sheetIndex: optimizedSheets.length + openSheets.length,
+      };
+      openSheets.push(sh);
+      return sh;
+    }
+
     return null;
   }
 
@@ -216,8 +270,13 @@ export function optimize(
     const ph = piece.height + kerf;
     let placed = false;
 
-    // Determine which open sheets this piece can use
-    const eligibleSheets = piece.stockSheetId
+    // Determine which open sheets this piece can use.
+    // If a stockSheetId is set AND that sheet ID exists in our stocks, restrict to it.
+    // If the stockSheetId is stale/unknown (e.g. after project reload), treat as unrestricted.
+    const stockIdIsValid =
+      piece.stockSheetId &&
+      availableSheets.some((a) => a.sheet.id === piece.stockSheetId);
+    const eligibleSheets = stockIdIsValid
       ? openSheets.filter((sh) => sh.sheetDef.id === piece.stockSheetId)
       : openSheets;
 
@@ -249,38 +308,33 @@ export function optimize(
     }
 
     if (!placed) {
-      const newSheet = openNewSheet(piece.stockSheetId);
+      // Pass preferred stock ID only if it's a valid/known sheet
+      const newSheet = openNewSheet(
+        pw,
+        ph,
+        stockIdIsValid ? piece.stockSheetId : undefined,
+      );
       if (newSheet) {
-        // When restricted to a specific stock sheet, only open that type
-        if (piece.stockSheetId && newSheet.sheetDef.id !== piece.stockSheetId) {
-          // Couldn't open the right sheet type
-        } else {
-          const fit = findBestFreeRect(
-            newSheet.freeRects,
-            pw,
-            ph,
-            allowRotation,
-          );
-          if (fit) {
-            const fr = newSheet.freeRects[fit.index];
-            const placedW = fit.rotated ? ph : pw;
-            const placedH = fit.rotated ? pw : ph;
+        const fit = findBestFreeRect(newSheet.freeRects, pw, ph, allowRotation);
+        if (fit) {
+          const fr = newSheet.freeRects[fit.index];
+          const placedW = fit.rotated ? ph : pw;
+          const placedH = fit.rotated ? pw : ph;
 
-            newSheet.placedPieces.push({
-              label: piece.label,
-              x: fr.x,
-              y: fr.y,
-              w: fit.rotated ? piece.height : piece.width,
-              h: fit.rotated ? piece.width : piece.height,
-              rotated: fit.rotated,
-              pieceId: piece.id,
-              colorIndex,
-            });
+          newSheet.placedPieces.push({
+            label: piece.label,
+            x: fr.x,
+            y: fr.y,
+            w: fit.rotated ? piece.height : piece.width,
+            h: fit.rotated ? piece.width : piece.height,
+            rotated: fit.rotated,
+            pieceId: piece.id,
+            colorIndex,
+          });
 
-            const newRects = guillotineSplit(fr, placedW, placedH);
-            newSheet.freeRects.splice(fit.index, 1, ...newRects);
-            placed = true;
-          }
+          const newRects = guillotineSplit(fr, placedW, placedH);
+          newSheet.freeRects.splice(fit.index, 1, ...newRects);
+          placed = true;
         }
       }
 
@@ -292,11 +346,27 @@ export function optimize(
     }
   }
 
-  // Finalize all open sheets
+  // Collect auto-increased sheets info (include sheetId for stock quantity sync)
+  const autoIncreasedSheets: Array<{
+    sheetId: string;
+    sheetLabel: string;
+    addedQty: number;
+  }> = [];
+  for (const avail of availableSheets) {
+    if (avail.autoAdded > 0) {
+      autoIncreasedSheets.push({
+        sheetId: avail.sheet.id,
+        sheetLabel: avail.sheet.label,
+        addedQty: avail.autoAdded,
+      });
+    }
+  }
+
+  // Finalize all open sheets — skip sheets with no placed pieces (blank sheets)
   let totalArea = 0;
   let usedArea = 0;
 
-  for (const sh of openSheets) {
+  for (const sh of openSheets.filter((s) => s.placedPieces.length > 0)) {
     const sheetTotalArea = sh.sheetDef.width * sh.sheetDef.height;
     const sheetUsedArea = sh.placedPieces.reduce(
       (sum, p) => sum + p.w * p.h,
@@ -329,5 +399,6 @@ export function optimize(
     usedArea,
     utilization: totalArea > 0 ? (usedArea / totalArea) * 100 : 0,
     unplacedPieces,
+    autoIncreasedSheets,
   };
 }
