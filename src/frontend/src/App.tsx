@@ -30,6 +30,7 @@ import {
   ChevronDown,
   ChevronUp,
   Download,
+  FilePlus,
   FolderOpen,
   Layers,
   LogOut,
@@ -210,8 +211,13 @@ function SheetDiagram({
           {/* Placed pieces */}
           {sheet.placedPieces.map((p, idx) => {
             const colors = PIECE_COLORS[p.colorIndex % PIECE_COLORS.length];
-            const fontSize = Math.min(p.w, p.h) * 0.1;
-            const showLabel = p.w > 20 && p.h > 20;
+            // Scale-aware font sizing: compute pixel size at current scale
+            const pxW = p.w * scale;
+            const pxH = p.h * scale;
+            const showLabel = pxW > 36 && pxH > 24;
+            // Target ~13px for label, ~11px for dims; convert back to SVG units
+            const labelFontSize = Math.min(13 / scale, p.w * 0.45, p.h * 0.35);
+            const dimFontSize = Math.min(11 / scale, p.w * 0.38, p.h * 0.28);
             const isHovered = hoveredIdx === idx;
             const cx = p.x + p.w / 2;
             const cy = p.y + p.h / 2;
@@ -242,10 +248,10 @@ function SheetDiagram({
                   <>
                     <text
                       x={cx}
-                      y={cy - fontSize * 0.6}
+                      y={cy - labelFontSize * 0.7}
                       textAnchor="middle"
                       dominantBaseline="middle"
-                      fontSize={Math.min(fontSize * 1.4, 14, p.w * 0.2)}
+                      fontSize={labelFontSize}
                       fontFamily="JetBrains Mono, monospace"
                       fontWeight="600"
                       fill={colors.text}
@@ -254,13 +260,13 @@ function SheetDiagram({
                     </text>
                     <text
                       x={cx}
-                      y={cy + fontSize * 1.2}
+                      y={cy + dimFontSize * 1.1}
                       textAnchor="middle"
                       dominantBaseline="middle"
-                      fontSize={Math.min(fontSize * 0.9, 10, p.w * 0.14)}
+                      fontSize={dimFontSize}
                       fontFamily="JetBrains Mono, monospace"
                       fill={colors.text}
-                      opacity={0.75}
+                      opacity={0.8}
                     >
                       {p.w}×{p.h}
                       {p.rotated ? "↺" : ""}
@@ -575,6 +581,10 @@ function App() {
   const [showProjects, setShowProjects] = useState(false);
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
+  const [showNewProjectConfirm, setShowNewProjectConfirm] = useState(false);
+  const [pendingProjectLoad, setPendingProjectLoad] = useState<
+    (typeof projects)[0] | null
+  >(null);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
 
@@ -919,6 +929,28 @@ function App() {
               <FolderOpen className="w-3.5 h-3.5" />
               Projects
             </Button>
+
+            {/* New Project Button — only when logged in */}
+            {isLoggedIn && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  const hasData = stocks.length > 0 || pieces.length > 0;
+                  if (hasData) {
+                    setShowNewProjectConfirm(true);
+                  } else {
+                    // workspace already empty, nothing to clear
+                    toast.info("Workspace is already empty.");
+                  }
+                }}
+                className="gap-1.5 text-xs"
+                data-ocid="project.new_button"
+              >
+                <FilePlus className="w-3.5 h-3.5" />
+                New
+              </Button>
+            )}
 
             {/* Save Button — only when logged in */}
             {isLoggedIn && (
@@ -2202,7 +2234,14 @@ function App() {
                       size="sm"
                       variant="ghost"
                       className="text-xs h-7 px-2"
-                      onClick={() => loadProject(p)}
+                      onClick={() => {
+                        if (stocks.length > 0 || pieces.length > 0) {
+                          setShowProjects(false);
+                          setPendingProjectLoad(p);
+                        } else {
+                          loadProject(p);
+                        }
+                      }}
                     >
                       Load
                     </Button>
@@ -2249,6 +2288,44 @@ function App() {
           © {new Date().getFullYear()} Built with ❤️ using caffeine.ai
         </a>
       </footer>
+
+      {/* New Project Confirmation Dialog */}
+      <AlertDialog
+        open={showNewProjectConfirm}
+        onOpenChange={setShowNewProjectConfirm}
+      >
+        <AlertDialogContent data-ocid="new_project.dialog">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Start a new project?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Starting a new project will clear the current workspace. Any
+              unsaved changes will be lost.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel data-ocid="new_project.cancel_button">
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setStocks([]);
+                setPieces([]);
+                setResult(null);
+                setProjectName("");
+                setCurrentProjectId(null);
+                setActiveProjectId(null);
+                setLaminateOptions([]);
+                setShowNewProjectConfirm(false);
+                toast.success("New project started.");
+              }}
+              data-ocid="new_project.confirm_button"
+            >
+              <FilePlus className="w-3.5 h-3.5 mr-1.5" />
+              New Project
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Save Project Dialog */}
       <Dialog open={showSaveDialog} onOpenChange={setShowSaveDialog}>
@@ -2322,7 +2399,43 @@ function App() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+      <AlertDialog
+        open={pendingProjectLoad !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingProjectLoad(null);
+        }}
+      >
+        <AlertDialogContent data-ocid="load_project.dialog">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Load project?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Your current workspace has unsaved changes. Loading a new project
+              will discard them.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel
+              data-ocid="load_project.cancel_button"
+              onClick={() => setPendingProjectLoad(null)}
+            >
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              data-ocid="load_project.confirm_button"
+              onClick={() => {
+                if (pendingProjectLoad) {
+                  loadProject(pendingProjectLoad);
+                }
+                setPendingProjectLoad(null);
+              }}
+            >
+              Discard & Load
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
+      <Toaster richColors />
       <Toaster richColors />
     </div>
   );
