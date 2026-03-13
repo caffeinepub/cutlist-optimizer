@@ -3,7 +3,7 @@ import Time "mo:core/Time";
 import Text "mo:core/Text";
 import Runtime "mo:core/Runtime";
 import Iter "mo:core/Iter";
-import Array "mo:core/Array";
+import List "mo:core/List";
 import Principal "mo:core/Principal";
 import AccessControl "authorization/access-control";
 import MixinAuthorization "authorization/MixinAuthorization";
@@ -40,10 +40,56 @@ actor {
     name : Text;
   };
 
+  // In-memory state
   let projects = Map.empty<Principal, Map.Map<Text, Project>>();
   let userProfiles = Map.empty<Principal, UserProfile>();
 
-  // Helper functions for state modification (can only be used in shared functions)
+  // Stable storage for persistence across canister upgrades
+  // (var declarations in actors are implicitly stable)
+  var _stableAdminAssigned : Bool = false;
+  var _stableUserRoles : [(Principal, AccessControl.UserRole)] = [];
+  var _stableUserProfiles : [(Principal, UserProfile)] = [];
+  var _stableProjectEntries : [(Principal, Text, Project)] = [];
+
+  // Save state to stable vars before upgrade
+  system func preupgrade() {
+    _stableAdminAssigned := accessControlState.adminAssigned;
+    _stableUserRoles := accessControlState.userRoles.entries().toArray();
+    _stableUserProfiles := userProfiles.entries().toArray();
+
+    let buf = List.empty<(Principal, Text, Project)>();
+    for ((principal, userProjects) in projects.entries()) {
+      for ((id, project) in userProjects.entries()) {
+        let entry : (Principal, Text, Project) = (principal, id, project);
+        buf.add(entry);
+      };
+    };
+    _stableProjectEntries := buf.toArray();
+  };
+
+  // Restore state from stable vars after upgrade
+  system func postupgrade() {
+    accessControlState.adminAssigned := _stableAdminAssigned;
+    for ((principal, role) in _stableUserRoles.vals()) {
+      accessControlState.userRoles.add(principal, role);
+    };
+    for ((principal, profile) in _stableUserProfiles.vals()) {
+      userProfiles.add(principal, profile);
+    };
+    for ((principal, id, project) in _stableProjectEntries.vals()) {
+      let userProjects = switch (projects.get(principal)) {
+        case (null) {
+          let newMap = Map.empty<Text, Project>();
+          projects.add(principal, newMap);
+          newMap;
+        };
+        case (?existing) { existing };
+      };
+      userProjects.add(id, project);
+    };
+  };
+
+  // Helper functions
   func getUserProjectsMut(user : Principal) : Map.Map<Text, Project> {
     switch (projects.get(user)) {
       case (null) {
@@ -55,7 +101,6 @@ actor {
     };
   };
 
-  // Helper function for read-only access (safe for query functions)
   func getUserProjectsReadOnly(user : Principal) : ?Map.Map<Text, Project> {
     projects.get(user);
   };
@@ -90,7 +135,7 @@ actor {
 
     let timestamp = Time.now();
     let id = timestamp.toText();
-    let project = {
+    let project : Project = {
       id;
       name;
       sheets;
@@ -130,7 +175,7 @@ actor {
     switch (userProjects.get(projectId)) {
       case (null) { Runtime.trap("Project not found") };
       case (?existingProject) {
-        let updatedProject = {
+        let updatedProject : Project = {
           existingProject with
           name;
           sheets;
@@ -211,13 +256,14 @@ actor {
       Runtime.trap("Unauthorized: Only admins can view all projects");
     };
 
-    var result : [(Principal, Project)] = [];
+    let result = List.empty<(Principal, Project)>();
     for ((user, userProjects) in projects.entries()) {
-      for ((id, project) in userProjects.entries()) {
-        result := result.concat([(user, project)]);
+      for ((_id, project) in userProjects.entries()) {
+        let entry : (Principal, Project) = (user, project);
+        result.add(entry);
       };
     };
-    result;
+    result.toArray();
   };
 
   public shared ({ caller }) func clearUserData() : async () {

@@ -41,6 +41,8 @@ export interface OptimizedSheet {
   sheetLabel: string;
   sheetWidth: number;
   sheetHeight: number;
+  laminateFront: string;
+  laminateBack: string;
   placedPieces: PlacedPiece[];
   freeRects: FreeRect[];
   usedArea: number;
@@ -309,6 +311,8 @@ export function optimize(
       sheetLabel: sh.sheetDef.label,
       sheetWidth: sh.sheetDef.width,
       sheetHeight: sh.sheetDef.height,
+      laminateFront: sh.sheetDef.laminateFront ?? "",
+      laminateBack: sh.sheetDef.laminateBack ?? "",
       placedPieces: sh.placedPieces,
       freeRects: sh.freeRects,
       usedArea: sheetUsedArea,

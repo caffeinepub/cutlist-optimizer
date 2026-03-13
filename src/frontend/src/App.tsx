@@ -1,3 +1,13 @@
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -22,6 +32,7 @@ import {
   Download,
   FolderOpen,
   Layers,
+  LogOut,
   Pencil,
   Plus,
   RotateCcw,
@@ -40,6 +51,7 @@ import {
   useCreateProject,
   useDeleteProject,
   useGetAllProjects,
+  useUpdateProject,
 } from "./hooks/useQueries";
 import { optimize } from "./utils/cutlistOptimizer";
 import type {
@@ -113,6 +125,12 @@ function SheetDiagram({
       <div className="flex items-center justify-between">
         <span className="font-display font-semibold text-foreground text-sm">
           Sheet {sheet.sheetIndex + 1} — {sheet.sheetLabel}
+          {(sheet.laminateFront || sheet.laminateBack) && (
+            <span className="font-normal text-muted-foreground">
+              {" "}
+              [F: {sheet.laminateFront || "—"} / B: {sheet.laminateBack || "—"}]
+            </span>
+          )}
         </span>
         <div className="flex items-center gap-3">
           <span className="text-mono text-xs text-muted-foreground">
@@ -555,11 +573,15 @@ function App() {
   // Project management
   const [projectName, setProjectName] = useState("");
   const [showProjects, setShowProjects] = useState(false);
+  const [showSaveDialog, setShowSaveDialog] = useState(false);
+  const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
+  const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
 
   const { data: projects = [], isLoading: projectsLoading } =
     useGetAllProjects();
   const createProject = useCreateProject();
+  const updateProject = useUpdateProject();
   const deleteProject = useDeleteProject();
 
   // Save edit for a stock sheet
@@ -745,15 +767,15 @@ function App() {
     );
   }, [stocks, pieces, allowRotation, considerKerf, kerfValue]);
 
-  // Save project
-  const saveProject = useCallback(async () => {
+  // Save project — returns true on success
+  const saveProject = useCallback(async (): Promise<boolean> => {
     if (!isLoggedIn) {
       toast.error("Please log in to save projects");
-      return;
+      return false;
     }
     if (!projectName.trim()) {
       toast.error("Enter a project name");
-      return;
+      return false;
     }
     const backendSheets: Sheet[] = stocks.map((s) => ({
       sheetLabel: s.label,
@@ -768,16 +790,40 @@ function App() {
       quantity: BigInt(p.quantity),
     }));
     try {
-      await createProject.mutateAsync({
-        name: projectName,
-        sheets: backendSheets,
-        pieces: backendPieces,
-      });
+      if (currentProjectId) {
+        await updateProject.mutateAsync({
+          id: currentProjectId,
+          name: projectName,
+          sheets: backendSheets,
+          pieces: backendPieces,
+        });
+      } else {
+        const newId = await createProject.mutateAsync({
+          name: projectName,
+          sheets: backendSheets,
+          pieces: backendPieces,
+        });
+        if (newId) {
+          setCurrentProjectId(newId);
+        }
+      }
       toast.success(`Project "${projectName}" saved!`);
-    } catch {
-      toast.error("Failed to save project");
+      return true;
+    } catch (error) {
+      const msg =
+        error instanceof Error ? error.message : "Failed to save project";
+      toast.error(`Save failed: ${msg}`);
+      return false;
     }
-  }, [isLoggedIn, projectName, stocks, pieces, createProject]);
+  }, [
+    isLoggedIn,
+    projectName,
+    stocks,
+    pieces,
+    createProject,
+    updateProject,
+    currentProjectId,
+  ]);
 
   // Load project
   const loadProject = useCallback((project: (typeof projects)[0]) => {
@@ -801,6 +847,7 @@ function App() {
     );
     setProjectName(project.name);
     setActiveProjectId(project.id);
+    setCurrentProjectId(project.id);
     setShowProjects(false);
     setResult(null);
     setEditingId(null);
@@ -873,14 +920,29 @@ function App() {
               Projects
             </Button>
 
+            {/* Save Button — only when logged in */}
+            {isLoggedIn && (
+              <Button
+                variant="default"
+                size="sm"
+                onClick={() => setShowSaveDialog(true)}
+                className="gap-1.5 text-xs"
+                data-ocid="project.open_modal_button"
+              >
+                <Save className="w-3.5 h-3.5" />
+                Save
+              </Button>
+            )}
+
             {/* Auth */}
             {isLoggedIn ? (
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={clear}
-                className="text-xs text-muted-foreground"
+                onClick={() => setShowLogoutConfirm(true)}
+                className="text-xs text-muted-foreground gap-1"
               >
+                <LogOut className="w-3 h-3" />
                 {identity?.getPrincipal().toString().slice(0, 8)}…
               </Button>
             ) : (
@@ -904,6 +966,37 @@ function App() {
         <aside className="w-80 shrink-0 border-r border-border bg-sidebar flex flex-col">
           <div className="flex-1 overflow-y-auto min-h-0">
             <div className="p-4 space-y-6">
+              {/* Project save */}
+              {isLoggedIn && (
+                <section>
+                  <h2 className="font-display font-semibold text-sm text-foreground mb-3">
+                    Save Project
+                  </h2>
+                  <div className="space-y-2">
+                    <Input
+                      value={projectName}
+                      onChange={(e) => setProjectName(e.target.value)}
+                      placeholder="Project name…"
+                      className="h-7 text-xs"
+                      data-ocid="project.input"
+                    />
+                    <Button
+                      onClick={saveProject}
+                      size="sm"
+                      variant="outline"
+                      className="w-full h-7 text-xs gap-1.5"
+                      disabled={createProject.isPending}
+                      data-ocid="project.save_button"
+                    >
+                      <Save className="w-3.5 h-3.5" />
+                      {createProject.isPending ? "Saving…" : "Save Project"}
+                    </Button>
+                  </div>
+                </section>
+              )}
+
+              {isLoggedIn && <Separator />}
+
               {/* Stock Sheets Section */}
               <section>
                 <div className="flex items-center gap-2 mb-3">
@@ -1579,37 +1672,6 @@ function App() {
                   )}
                 </div>
               </section>
-
-              <Separator />
-
-              {/* Project save */}
-              {isLoggedIn && (
-                <section>
-                  <h2 className="font-display font-semibold text-sm text-foreground mb-3">
-                    Save Project
-                  </h2>
-                  <div className="space-y-2">
-                    <Input
-                      value={projectName}
-                      onChange={(e) => setProjectName(e.target.value)}
-                      placeholder="Project name…"
-                      className="h-7 text-xs"
-                      data-ocid="project.input"
-                    />
-                    <Button
-                      onClick={saveProject}
-                      size="sm"
-                      variant="outline"
-                      className="w-full h-7 text-xs gap-1.5"
-                      disabled={createProject.isPending}
-                      data-ocid="project.save_button"
-                    >
-                      <Save className="w-3.5 h-3.5" />
-                      {createProject.isPending ? "Saving…" : "Save Project"}
-                    </Button>
-                  </div>
-                </section>
-              )}
             </div>
           </div>
 
@@ -2187,6 +2249,79 @@ function App() {
           © {new Date().getFullYear()} Built with ❤️ using caffeine.ai
         </a>
       </footer>
+
+      {/* Save Project Dialog */}
+      <Dialog open={showSaveDialog} onOpenChange={setShowSaveDialog}>
+        <DialogContent className="max-w-sm" data-ocid="project.save_dialog">
+          <DialogHeader>
+            <DialogTitle className="font-display">Save Project</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <Label htmlFor="save-project-name" className="text-sm">
+              Project name
+            </Label>
+            <Input
+              id="save-project-name"
+              value={projectName}
+              onChange={(e) => setProjectName(e.target.value)}
+              placeholder="e.g. Kitchen Cabinet"
+              className="h-8 text-sm"
+              data-ocid="project.save_dialog.input"
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  saveProject();
+                  setShowSaveDialog(false);
+                }
+              }}
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setShowSaveDialog(false)}
+              data-ocid="project.save_dialog.cancel_button"
+            >
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              onClick={async () => {
+                const ok = await saveProject();
+                if (ok) setShowSaveDialog(false);
+              }}
+              disabled={createProject.isPending}
+              data-ocid="project.save_dialog.submit_button"
+            >
+              <Save className="w-3.5 h-3.5 mr-1.5" />
+              {createProject.isPending ? "Saving…" : "Save"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <AlertDialog open={showLogoutConfirm} onOpenChange={setShowLogoutConfirm}>
+        <AlertDialogContent data-ocid="logout.dialog">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Log out?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Any unsaved changes will be lost. Make sure you have saved your
+              project before logging out.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel data-ocid="logout.cancel_button">
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={clear}
+              data-ocid="logout.confirm_button"
+            >
+              Log out
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <Toaster richColors />
     </div>
